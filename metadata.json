@@ -1,0 +1,6 @@
+{
+  "name": "بوصلة",
+  "description": "نظام مالي وإدارة محل الخضار والمطبخ بطريقة مالي بدل الوزن كاشير ذكي، إدارة مخزن، ديون عملاء وموردين وحسابات بنكية",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
