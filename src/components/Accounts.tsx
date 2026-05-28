@@ -21,17 +21,21 @@ import {
   ArrowDownLeft,
   ArrowUpRight,
   PlusCircle,
-  TrendingUpIcon
+  TrendingUpIcon,
+  Pencil,
+  Trash,
+  Droplet
 } from 'lucide-react';
-import { AppState, TransactionType, PaymentMethod, AccountBalances } from '../types';
+import { AppState, TransactionType, PaymentMethod, AccountBalances, Transaction } from '../types';
 import { formatCurrency, formatDateTime } from '../utils';
 
 interface AccountsProps {
   appState: AppState;
   onAddTransaction: (tx: any, updatedInventory?: any, updatedAccounts?: any) => void;
+  setAppState: React.Dispatch<React.SetStateAction<AppState>>;
 }
 
-export default function Accounts({ appState, onAddTransaction }: AccountsProps) {
+export default function Accounts({ appState, onAddTransaction, setAppState }: AccountsProps) {
   const [activeTab, setActiveTab] = useState<'vault' | 'history'>('vault');
   const [filterType, setFilterType] = useState<string>('ALL');
 
@@ -48,6 +52,16 @@ export default function Accounts({ appState, onAddTransaction }: AccountsProps) 
   const [expenseAmount, setExpenseAmount] = useState<string>('');
   const [expenseSource, setExpenseSource] = useState<keyof AccountBalances>('cash');
   const [expenseDescription, setExpenseDescription] = useState<string>('شراء أكياس بلاستيكية للتعبئة');
+
+  // حقول إضافة السيولة
+  const [showLiquidityModal, setShowLiquidityModal] = useState<boolean>(false);
+  const [liquidityAmount, setLiquidityAmount] = useState<string>('');
+  const [liquidityTarget, setLiquidityTarget] = useState<keyof AccountBalances>('cash');
+
+  // حقول تعديل وحذف العمليات
+  const [editTx, setEditTx] = useState<Transaction | null>(null);
+  const [editDescription, setEditDescription] = useState<string>('');
+  const [editAmount, setEditAmount] = useState<string>('');
 
   // حساب السيولة الإجمالية المتوفرة حالياً
   const totalLiquidity = useMemo(() => {
@@ -140,6 +154,145 @@ export default function Accounts({ appState, onAddTransaction }: AccountsProps) 
     alert('تم التحويل وتسجيل القيد بنجاح! 🔃');
   };
 
+  // دالة عكس تأثير العملية المالية على الأرصدة (لأغراض الحذف أو التعديل)
+  const reverseTransactionImpact = (tx: Transaction, currentState: AppState): AppState => {
+    const state = JSON.parse(JSON.stringify(currentState)) as AppState;
+    
+    const updateDebt = (type: 'customer' | 'supplier', id: string, amt: number) => {
+      if (type === 'customer') {
+        const c = state.customers.find(x => x.id === id);
+        if (c) c.debt += amt;
+      } else {
+        const s = state.suppliers.find(x => x.id === id);
+        if (s) s.debt += amt;
+      }
+    };
+
+    const changeAcc = (acc: string | undefined, amt: number) => {
+      if (acc && acc !== 'DEBT' && state.accounts[acc as keyof AccountBalances] !== undefined) {
+        state.accounts[acc as keyof AccountBalances] += amt;
+      }
+    };
+
+    const amt = tx.amount;
+    switch (tx.type) {
+      case TransactionType.SALE:
+        state.inventory.marketValue += amt;
+        state.inventory.purchaseValue += (tx.details?.calculatedCost || 0);
+        if (tx.toAccount === 'DEBT' && tx.partyId) updateDebt('customer', tx.partyId, -amt);
+        else changeAcc(tx.toAccount, -amt);
+        break;
+      case TransactionType.PURCHASE:
+        state.inventory.purchaseValue -= amt;
+        state.inventory.marketValue -= (tx.details?.marketValueAdded || 0);
+        if (tx.fromAccount === 'DEBT' && tx.partyId) updateDebt('supplier', tx.partyId, -amt);
+        else changeAcc(tx.fromAccount, amt);
+        break;
+      case TransactionType.DAMAGED:
+        state.inventory.purchaseValue += (tx.details?.calculatedCost || 0);
+        state.inventory.marketValue += (tx.details?.marketValueDeducted || 0);
+        break;
+      case TransactionType.PRICE_ADJUST:
+        if (tx.details?.prevValue !== undefined && tx.details?.newValue !== undefined) {
+          state.inventory.marketValue -= (tx.details.newValue - tx.details.prevValue);
+        }
+        break;
+      case TransactionType.PAY_CUSTOMER:
+        if (tx.partyId) updateDebt('customer', tx.partyId, amt);
+        changeAcc(tx.toAccount, -amt);
+        break;
+      case TransactionType.PAY_SUPPLIER:
+        if (tx.partyId) updateDebt('supplier', tx.partyId, amt);
+        changeAcc(tx.fromAccount, amt);
+        break;
+      case TransactionType.TRANSFER:
+        changeAcc(tx.fromAccount, amt);
+        changeAcc(tx.toAccount, -amt);
+        break;
+      case TransactionType.EXPENSE:
+        changeAcc(tx.fromAccount, amt);
+        break;
+      case TransactionType.LIQUIDITY_ADD:
+        changeAcc(tx.toAccount, -amt);
+        break;
+      case TransactionType.INVENTORY_ADJUST:
+        if (tx.details?.prevPurchaseValue !== undefined) state.inventory.purchaseValue = tx.details.prevPurchaseValue;
+        if (tx.details?.prevMarketValue !== undefined) state.inventory.marketValue = tx.details.prevMarketValue;
+        break;
+    }
+    return state;
+  };
+
+  // حذف عملية مالية
+  const handleDeleteTx = (tx: Transaction) => {
+    if (!window.confirm('هل أنت متأكد من حذف هذه العملية؟ سيتم عكس تأثيرها على الحسابات والمخزن تلقائياً.')) return;
+    const reversedState = reverseTransactionImpact(tx, appState);
+    reversedState.transactions = reversedState.transactions.filter(t => t.id !== tx.id);
+    setAppState(reversedState);
+  };
+
+  // حفظ تعديلات العملية
+  const handleSaveEdit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editTx) return;
+    
+    const newAmt = parseFloat(editAmount) || 0;
+    const isSimpleType = editTx.type === TransactionType.EXPENSE || editTx.type === TransactionType.LIQUIDITY_ADD;
+    
+    if (isSimpleType && newAmt !== editTx.amount) {
+       // For simple changes, we revert the old one entirely, and change the amount directly.
+       let newState = reverseTransactionImpact(editTx, appState);
+       // Apply new impact manually:
+       if (editTx.type === TransactionType.EXPENSE) newState.accounts[editTx.fromAccount as keyof AccountBalances] -= newAmt;
+       if (editTx.type === TransactionType.LIQUIDITY_ADD) newState.accounts[editTx.toAccount as keyof AccountBalances] += newAmt;
+       
+       // Update transaction
+       newState.transactions = newState.transactions.map(t => {
+         if (t.id === editTx.id) return { ...t, description: editDescription, amount: newAmt };
+         return t;
+       });
+       setAppState(newState);
+    } else {
+       // Complex type or only description changed
+       setAppState(prev => ({
+         ...prev,
+         transactions: prev.transactions.map(t => {
+           if (t.id === editTx.id) return { ...t, description: editDescription };
+           return t;
+         })
+       }));
+    }
+    setEditTx(null);
+  };
+
+  // تسجيل سيولة جديدة
+  const handleAddLiquidity = (e: React.FormEvent) => {
+    e.preventDefault();
+    const amt = parseFloat(liquidityAmount) || 0;
+    if (amt <= 0) return;
+    
+    const tx = {
+      id: `tx-${Date.now()}`,
+      type: TransactionType.LIQUIDITY_ADD,
+      amount: amt,
+      toAccount: liquidityTarget,
+      description: 'إيداع وضخ سيولة إضافية في الحساب',
+      timestamp: new Date().toISOString()
+    };
+    
+    const updatedAccounts = { ...appState.accounts };
+    updatedAccounts[liquidityTarget] += amt;
+    
+    setAppState(prev => ({
+      ...prev,
+      accounts: updatedAccounts,
+      transactions: [...prev.transactions, tx]
+    }));
+    
+    setLiquidityAmount('');
+    setShowLiquidityModal(false);
+  };
+
   // ٢. تسجيل مصروف مباشر
   const handleAddExpense = (e: React.FormEvent) => {
     e.preventDefault();
@@ -198,6 +351,12 @@ export default function Accounts({ appState, onAddTransaction }: AccountsProps) 
         return <span className="bg-slate-500/20 text-slate-300 border border-slate-700 text-[10px] px-2 py-0.5 rounded-full font-bold">تحويل رصيد</span>;
       case TransactionType.EXPENSE:
         return <span className="bg-red-500/10 text-red-400 border border-red-500/20 text-[10px] px-2 py-0.5 rounded-full font-bold">مصروف عام</span>;
+      case TransactionType.LIQUIDITY_ADD:
+        return <span className="bg-emerald-600/20 text-emerald-300 border border-emerald-500/30 text-[10px] px-2 py-0.5 rounded-full font-bold">إضافة سيولة</span>;
+      case TransactionType.INVENTORY_ADJUST:
+        return <span className="bg-indigo-600/20 text-indigo-300 border border-indigo-500/30 text-[10px] px-2 py-0.5 rounded-full font-bold">تعديل جرد</span>;
+      default:
+        return <span className="bg-slate-500/20 text-slate-300 border border-slate-700 text-[10px] px-2 py-0.5 rounded-full font-bold">عملية مالية</span>;
     }
   };
 
@@ -263,6 +422,13 @@ export default function Accounts({ appState, onAddTransaction }: AccountsProps) 
             >
               <PlusCircle className="w-3 h-3 text-rose-400" />
               <span>مصروف مباشر</span>
+            </button>
+            <button
+              onClick={() => setShowLiquidityModal(true)}
+              className="text-[10px] font-bold bg-slate-800 hover:bg-slate-700 border border-slate-700 px-2 py-1.5 rounded-lg flex items-center gap-1"
+            >
+              <Droplet className="w-3 h-3 text-sky-400" />
+              <span>ضخ سيولة</span>
             </button>
           </div>
         )}
@@ -440,13 +606,25 @@ export default function Accounts({ appState, onAddTransaction }: AccountsProps) 
                         </div>
 
                         {/* سعر العملية وحساب التكلفة والربح الملتصق بالبيع */}
-                        <div className="text-left">
+                        <div className="text-left flex flex-col items-end gap-1">
                           <span className="font-mono font-extrabold text-sm text-slate-150">
                             {tx.type === TransactionType.DAMAGED || tx.type === TransactionType.EXPENSE
                               ? `-${formatCurrency(tx.amount)}`
                               : formatCurrency(tx.amount)
                             }
                           </span>
+                          <div className="flex gap-1.5">
+                             <button onClick={() => {
+                               setEditTx(tx);
+                               setEditDescription(tx.description);
+                               setEditAmount(tx.amount.toString());
+                             }} className="p-1 text-slate-500 hover:text-sky-400 transition-colors bg-slate-900/50 rounded">
+                               <Pencil className="w-3 h-3" />
+                             </button>
+                             <button onClick={() => handleDeleteTx(tx)} className="p-1 text-slate-500 hover:text-rose-400 transition-colors bg-slate-900/50 rounded">
+                               <Trash className="w-3 h-3" />
+                             </button>
+                          </div>
                         </div>
                       </div>
 
@@ -536,6 +714,86 @@ export default function Accounts({ appState, onAddTransaction }: AccountsProps) 
                   className="w-full py-2.5 bg-emerald-500 text-slate-950 hover:bg-emerald-400 rounded-xl font-bold text-xs"
                 >
                   ترحيل وإتمام عملية النقل المالي
+                </button>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* مودال إضافة سيولة */}
+      <AnimatePresence>
+        {showLiquidityModal && (
+          <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-950/80">
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-sm overflow-hidden"
+            >
+              <div className="p-4 bg-slate-800/80 flex items-center justify-between border-b border-slate-800">
+                <button type="button" onClick={() => setShowLiquidityModal(false)} className="text-slate-400 hover:text-white text-xs font-bold">
+                  إلغاء
+                </button>
+                <h4 className="font-bold text-white text-sm">ضخ سيولة نقدية جديدة</h4>
+                <div className="w-5"></div>
+              </div>
+              <form onSubmit={handleAddLiquidity} className="p-5 space-y-4">
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">المبلغ بالأوقية *</label>
+                  <input type="number" required value={liquidityAmount} onChange={(e) => setLiquidityAmount(e.target.value)} className="w-full px-3 py-2 bg-slate-950 border border-slate-805 rounded-xl font-mono text-sm text-white focus:outline-none" />
+                </div>
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">الحساب المتلقي للسيولة</label>
+                  <select value={liquidityTarget} onChange={(e: any) => setLiquidityTarget(e.target.value)} className="w-full p-2.5 bg-slate-950 border border-slate-805 rounded-xl text-xs font-semibold focus:outline-none">
+                    <option value="cash">الخزنة النقذية</option>
+                    <option value="bankily">بنكيلي</option>
+                    <option value="masrify">مصرفي</option>
+                    <option value="sadad">سداد</option>
+                  </select>
+                </div>
+                <button type="submit" className="w-full py-2.5 bg-sky-600 hover:bg-sky-500 font-bold text-white rounded-xl text-xs">
+                  تأكيد إيداع السيولة
+                </button>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* مودال تعديل عملية */}
+      <AnimatePresence>
+        {Boolean(editTx) && (
+          <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-950/80">
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-sm overflow-hidden"
+            >
+              <div className="p-4 bg-slate-800/80 flex items-center justify-between border-b border-slate-800">
+                <button type="button" onClick={() => setEditTx(null)} className="text-slate-400 hover:text-white text-xs font-bold">
+                  إلغاء
+                </button>
+                <h4 className="font-bold text-white text-sm">تعديل بيان العملية</h4>
+                <div className="w-5"></div>
+              </div>
+              <form onSubmit={handleSaveEdit} className="p-5 space-y-4">
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">البيان / الوصف</label>
+                  <input type="text" required value={editDescription} onChange={(e) => setEditDescription(e.target.value)} className="w-full px-3 py-2 bg-slate-950 border border-slate-805 rounded-xl text-xs text-white focus:outline-none" />
+                </div>
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">المبلغ (متاح لبعض العمليات البسيطة فقط)</label>
+                  <input type="number" required value={editAmount} onChange={(e) => setEditAmount(e.target.value)} 
+                         disabled={!(editTx?.type === TransactionType.EXPENSE || editTx?.type === TransactionType.LIQUIDITY_ADD)} 
+                         className="w-full px-3 py-2 bg-slate-950 border border-slate-805 rounded-xl text-sm font-mono text-white focus:outline-none disabled:opacity-50" />
+                  {!(editTx?.type === TransactionType.EXPENSE || editTx?.type === TransactionType.LIQUIDITY_ADD) && (
+                     <p className="text-[9px] text-amber-400 mt-1">لا يمكن تعديل مبلغ هذه العملية لارتباطها بالمخزن والديون. إذا كان الرقم خاطئاً، قم بحذف العملية وسجلها مجدداً.</p>
+                  )}
+                </div>
+                <button type="submit" className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 font-bold text-white rounded-xl text-xs">
+                  حفظ التعديلات
                 </button>
               </form>
             </motion.div>

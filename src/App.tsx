@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Compass, 
@@ -15,12 +15,20 @@ import {
   HelpCircle, 
   Info,
   X,
+  Wifi,
   WifiOff,
   User,
-  DollarSign
+  DollarSign,
+  CloudUpload,
+  LogOut
 } from 'lucide-react';
 import { AppState, Customer, Supplier, Transaction } from './types';
 import { DEFAULT_INITIAL_STATE, formatCurrency } from './utils';
+
+// Firebase Integrations
+import { auth, db, handleFirestoreError, OperationType } from './firebase';
+import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User as FirebaseUser, signOut } from 'firebase/auth';
+import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 
 // استيراد المكونات الفرعية
 import Cashier from './components/Cashier';
@@ -31,6 +39,11 @@ import Accounts from './components/Accounts';
 const LOCAL_STORAGE_KEY = 'bousala_app_state_v2';
 
 export default function App() {
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const initialLoadDone = useRef(false);
+
   const [state, setState] = useState<AppState>(() => {
     try {
       const stored = localStorage.getItem(LOCAL_STORAGE_KEY);
@@ -46,14 +59,102 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'cashier' | 'inventory' | 'contacts' | 'accounts'>('cashier');
   const [showHelperModal, setShowHelperModal] = useState<boolean>(false);
 
-  // تحديث التخزين المحلي تلقائياً عند تغيير أي قيمة في حالة التطبيق لضمان الحفاظ على البيانات بالكامل
+  // 1. Setup Auth
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      setUser(currentUser);
+      if (currentUser) {
+        // Load data from Firebase
+        await loadStateFromFirebase(currentUser.uid);
+      } else {
+        setAuthLoading(false);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const loadStateFromFirebase = async (uid: string) => {
+    try {
+      setAuthLoading(true);
+      const docRef = doc(db, 'bousala_states', uid);
+      const snap = await getDoc(docRef);
+      if (snap.exists()) {
+        const data = snap.data() as any;
+        // Merge with local state to ensure all fields are present
+        setState(prev => ({
+          ...DEFAULT_INITIAL_STATE,
+          ...data,
+          inventory: data.inventory || DEFAULT_INITIAL_STATE.inventory,
+          accounts: data.accounts || DEFAULT_INITIAL_STATE.accounts,
+          settings: data.settings || DEFAULT_INITIAL_STATE.settings,
+          customers: data.customers || [],
+          suppliers: data.suppliers || [],
+          transactions: data.transactions || []
+        }));
+      } else {
+        // If no remote state, sync the local state to Firebase
+        await syncStateToFirebase(uid, state);
+      }
+    } catch (error) {
+      console.error("Firebase Auth/Network error:", error);
+      // Fallback is local state
+    } finally {
+      initialLoadDone.current = true;
+      setAuthLoading(false);
+    }
+  };
+
+  const syncStateToFirebase = async (uid: string, appState: AppState) => {
+    setIsSyncing(true);
+    try {
+      const docRef = doc(db, 'bousala_states', uid);
+      const payload = {
+        ...appState,
+        userId: uid,
+        updatedAt: serverTimestamp()
+      };
+      await setDoc(docRef, payload);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `bousala_states/${uid}`);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const loginProvider = async () => {
+    try {
+      const provider = new GoogleAuthProvider();
+      await signInWithPopup(auth, provider);
+    } catch (error) {
+      console.error("Login failed", error);
+      alert('فشل تسجيل الدخول. تأكد من اتصالك بالإنترنت والمحاولة مجدداً.');
+    }
+  };
+
+  const logout = async () => {
+    if (window.confirm('هل أنت متأكد من رغبتك في تسجيل الخروج؟ البيانات ستبقى محفوظة آمنة.')) {
+      await signOut(auth);
+      // Reset to local initial
+      setState(DEFAULT_INITIAL_STATE);
+      initialLoadDone.current = false;
+    }
+  };
+
+  // 2. Local & Remote Sync
   useEffect(() => {
     try {
       localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(state));
     } catch (e) {
       console.error('فشل حفظ البيانات المحدثة محلياً:', e);
     }
-  }, [state]);
+
+    if (initialLoadDone.current && user) {
+      const timeout = setTimeout(() => {
+        syncStateToFirebase(user.uid, state);
+      }, 1500); // Debounce saves to Firebase
+      return () => clearTimeout(timeout);
+    }
+  }, [state, user]);
 
   // دالة موحدة لتسجيل أي معاملة مالية وتحديث حالتين المخزون والحسابات المتأثرة
   const handleAddTransaction = (
@@ -93,13 +194,58 @@ export default function App() {
 
   // إعادة المحل لوضع المصنع والمحو الكامل للبيانات (مع طلب تأكيد)
   const handleResetToDefaults = () => {
-    const isConfirmed = window.confirm('تحذير صارم: هل أنت متأكد تماماً من رغبتك في مسح كافة البيانات المسجلة والديون والحسابات وإعادتها لقيم البداية الافتراضية؟ لا يمكن التراجع عن هذا.');
+    const isConfirmed = window.confirm('تحذير صارم: هل أنت متأكد تماماً من رغبتك في مسح كافة البيانات المسجلة والديون والحسابات وإعادتها لقيم البداية الافتراضية؟ لا يمكن التراجع عن هذا سيتم استبدال النسخة الاحتياطية أيضاً.');
     if (isConfirmed) {
       setState(DEFAULT_INITIAL_STATE);
       setActiveTab('cashier');
       alert('تمت تهيئة تطبيق "بوصلة" وإعادة تشغيله بنجاح! 🧭');
     }
   };
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-white">
+        <Compass className="w-12 h-12 text-emerald-500 animate-spin-slow mb-4" />
+        <p className="animate-pulse text-sm text-slate-400">جاري الاتصال بقاعدة البيانات...</p>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center text-right font-sans p-4 relative overflow-hidden">
+        {/* الديكورات الخلفية */}
+        <div className="absolute -top-32 -left-32 w-64 h-64 bg-emerald-500/10 rounded-full blur-[100px]" />
+        <div className="absolute -bottom-32 -right-32 w-80 h-80 bg-indigo-500/10 rounded-full blur-[100px]" />
+
+        <div className="w-full max-w-sm bg-slate-900/60 backdrop-blur-xl border border-slate-800 rounded-3xl p-8 z-10 shadow-2xl relative">
+          <div className="flex justify-center mb-6">
+            <div className="bg-emerald-500/20 p-4 rounded-3xl text-emerald-400 border border-emerald-500/30">
+              <Compass className="w-10 h-10 animate-spin-slow" />
+            </div>
+          </div>
+          <h2 className="text-2xl font-black text-center text-white mb-2 tracking-tight">بـوصـلـة السحابية</h2>
+          <p className="text-sm text-slate-400 text-center mb-8 leading-relaxed font-light">
+            قم بتسجيل الدخول للحفاظ على بيانات متجرك متزامنة بأمان في السحابة ومحمية من الضياع.
+          </p>
+
+          <button 
+            onClick={loginProvider}
+            className="w-full relative py-3 bg-white text-slate-950 hover:bg-slate-200 transition-all rounded-2xl font-bold flex items-center justify-center gap-3 overflow-hidden group shadow-[0_0_20px_rgba(255,255,255,0.1)] hover:shadow-[0_0_30px_rgba(255,255,255,0.2)]"
+          >
+            <div className="absolute inset-0 w-full h-full bg-gradient-to-r from-transparent via-white/40 to-transparent -translate-x-full group-hover:animate-[shimmer_1.5s_infinite]" />
+            <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none">
+              <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+              <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+              <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+              <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+            </svg>
+            تسجيل الدخول بـ Google
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 flex justify-center text-right font-sans antialiased selection:bg-emerald-500/30">
@@ -116,15 +262,20 @@ export default function App() {
               <Compass className="w-5 h-5 animate-spin-slow" />
             </div>
             <div>
-              <h1 className="text-sm font-black text-white tracking-wide">بـوصـلـة</h1>
+              <h1 className="text-sm font-black text-white tracking-wide flex items-center gap-1.5">
+                بـوصـلـة
+                {isSyncing ? (
+                  <CloudUpload className="w-3 h-3 text-emerald-500 animate-pulse" />
+                ) : (
+                  <Wifi className="w-3 h-3 text-sky-400" />
+                )}
+              </h1>
               <div className="flex items-center gap-1">
-                <WifiOff className="w-3 h-3 text-emerald-400" />
-                <span className="text-[9px] text-emerald-400 font-bold">مستقل ومحلي 100%</span>
+                <span className="text-[9px] text-slate-400 font-bold truncate max-w-[120px]">{user.email}</span>
               </div>
             </div>
           </div>
 
-          {/* أيقونات المساعدة والاشتعال */}
           <div className="flex items-center gap-1">
             <button
               onClick={() => setShowHelperModal(true)}
@@ -141,8 +292,14 @@ export default function App() {
             >
               <RotateCcw className="w-4 h-4" />
             </button>
+            <button
+              onClick={logout}
+              className="p-2 hover:bg-rose-950/20 rounded-xl text-slate-500 hover:text-rose-400 transition-colors"
+              title="تسجيل الخروج"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
           </div>
-
         </header>
 
         {/* جسم الشاشات الرئيسي (Main Body Screen Renderer) */}
@@ -152,6 +309,7 @@ export default function App() {
               appState={state}
               onAddTransaction={handleAddTransaction}
               onAddCustomer={handleAddCustomer}
+              setAppState={setState}
             />
           )}
 
@@ -160,6 +318,7 @@ export default function App() {
               appState={state}
               onAddTransaction={handleAddTransaction}
               onAddSupplier={handleAddSupplier}
+              setAppState={setState}
             />
           )}
 
@@ -169,6 +328,7 @@ export default function App() {
               onAddTransaction={handleAddTransaction}
               onAddCustomer={handleAddCustomer}
               onAddSupplier={handleAddSupplier}
+              setAppState={setState}
             />
           )}
 
@@ -176,6 +336,7 @@ export default function App() {
             <Accounts
               appState={state}
               onAddTransaction={handleAddTransaction}
+              setAppState={setState}
             />
           )}
         </main>

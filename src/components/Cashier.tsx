@@ -25,9 +25,10 @@ interface CashierProps {
   appState: AppState;
   onAddTransaction: (tx: any, updatedInventory?: any, updatedAccounts?: any, updatedCustomers?: any) => void;
   onAddCustomer: (customer: Customer) => void;
+  setAppState: React.Dispatch<React.SetStateAction<AppState>>;
 }
 
-export default function Cashier({ appState, onAddTransaction, onAddCustomer }: CashierProps) {
+export default function Cashier({ appState, onAddTransaction, onAddCustomer, setAppState }: CashierProps) {
   const [amountInput, setAmountInput] = useState<string>('');
   const [selectedCategory, setSelectedCategory] = useState<string>('خضار');
   const [showDebtOverlay, setShowDebtOverlay] = useState<boolean>(false);

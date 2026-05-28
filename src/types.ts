@@ -19,7 +19,9 @@ export enum TransactionType {
   PAY_CUSTOMER = 'PAY_CUSTOMER',  // سداد دين من عميل
   PAY_SUPPLIER = 'PAY_SUPPLIER',  // دفع مستحقات لمورد
   TRANSFER = 'TRANSFER',          // تحويل داخلي بين الحسابات
-  EXPENSE = 'EXPENSE'             // مصروفات عامة
+  EXPENSE = 'EXPENSE',            // مصروفات عامة
+  LIQUIDITY_ADD = 'LIQUIDITY_ADD', // إضافة سيولة للحساب
+  INVENTORY_ADJUST = 'INVENTORY_ADJUST' // تعديل يدوي افتتاحي للمخزن
 }
 
 export interface InventoryState {
@@ -67,6 +69,10 @@ export interface Transaction {
     ratioUsed?: number;       // النسبة المستخدمة في حساب التكلفة (الربط الذكي)
     calculatedCost?: number;  // التكلفة الشرائية المحتسبة
     profit?: number;          // صافي الربح المحتسب
+    prevPurchaseValue?: number;
+    prevMarketValue?: number;
+    marketValueDeducted?: number;
+    marketValueAdded?: number;
   };
 }
 

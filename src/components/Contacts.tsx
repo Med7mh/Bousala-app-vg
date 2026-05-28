@@ -27,9 +27,10 @@ interface ContactsProps {
   onAddTransaction: (tx: any, updatedInventory?: any, updatedAccounts?: any, updatedCustomers?: any, updatedSuppliers?: any) => void;
   onAddCustomer: (customer: Customer) => void;
   onAddSupplier: (supplier: Supplier) => void;
+  setAppState: React.Dispatch<React.SetStateAction<AppState>>;
 }
 
-export default function Contacts({ appState, onAddTransaction, onAddCustomer, onAddSupplier }: ContactsProps) {
+export default function Contacts({ appState, onAddTransaction, onAddCustomer, onAddSupplier, setAppState }: ContactsProps) {
   const [activeTab, setActiveTab] = useState<'customers' | 'suppliers'>('customers');
   const [searchTerm, setSearchTerm] = useState<string>('');
 

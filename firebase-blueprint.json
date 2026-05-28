@@ -1,0 +1,26 @@
+{
+  "entities": {
+    "AppStateDoc": {
+      "title": "Application State",
+      "description": "The entire state of the Bousala application.",
+      "type": "object",
+      "properties": {
+        "inventory": { "type": "object" },
+        "accounts": { "type": "object" },
+        "settings": { "type": "object" },
+        "customers": { "type": "array" },
+        "suppliers": { "type": "array" },
+        "transactions": { "type": "array" },
+        "userId": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["inventory", "accounts", "settings", "customers", "suppliers", "transactions", "userId", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/bousala_states/{userId}": {
+      "schema": { "$ref": "#/entities/AppStateDoc" },
+      "description": "Stores the user's application state."
+    }
+  }
+}

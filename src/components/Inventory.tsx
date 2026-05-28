@@ -26,11 +26,19 @@ interface InventoryProps {
   appState: AppState;
   onAddTransaction: (tx: any, updatedInventory?: any, updatedAccounts?: any, updatedCustomers?: any, updatedSuppliers?: any) => void;
   onAddSupplier: (supplier: Supplier) => void;
+  setAppState: React.Dispatch<React.SetStateAction<AppState>>;
 }
 
-export default function Inventory({ appState, onAddTransaction, onAddSupplier }: InventoryProps) {
+export default function Inventory({ appState, onAddTransaction, onAddSupplier, setAppState }: InventoryProps) {
   // للتحكم في النوافذ المنبثقة والتبويبات
-  const [activeTab, setActiveTab] = useState<'purchase' | 'fluctuation' | 'waste'>('purchase');
+  const [activeTab, setActiveTab] = useState<'purchase' | 'fluctuation' | 'waste' | 'manual_adjust'>('purchase');
+
+  // حقول التعديل اليدوي والافتتاحي
+  const [manualPurchase, setManualPurchase] = useState<string>('');
+  const [manualMarket, setManualMarket] = useState<string>('');
+  
+  // حاسبة التقلب اليدوية
+  const [customFluctuation, setCustomFluctuation] = useState<string>('');
   
   // حقول إضافة مشتريات للمخزن
   const [purchaseCost, setPurchaseCost] = useState<string>('');
@@ -187,6 +195,39 @@ export default function Inventory({ appState, onAddTransaction, onAddSupplier }:
 
     onAddTransaction(tx, updatedInventory);
     alert(`تم تعديل القيمة السوقية للمخزن بمقدار ${percentage}% بنجاح! 🥬`);
+  };
+
+  // تعيين الأرصدة الافتتاحية / اليدوية للمخزن بدون تأثير على الصندوق
+  const handleManualAdjust = (e: React.FormEvent) => {
+    e.preventDefault();
+    const pVal = parseFloat(manualPurchase) || 0;
+    const mVal = parseFloat(manualMarket) || 0;
+    if (pVal < 0 || mVal < 0) return;
+    const confirmIt = window.confirm('هل أنت متأكد من تغيير أصول المخزن المالي يدوياً؟ هذا سيستبدل القيم الحالية.');
+    if (!confirmIt) return;
+
+    const tx = {
+      id: `tx-${Date.now()}`,
+      type: TransactionType.INVENTORY_ADJUST,
+      amount: 0,
+      description: `تعديل يدوي/افتتاحي للمخزن. القيمة الشرائية: ${formatCurrency(pVal)}، السوقية: ${formatCurrency(mVal)}`,
+      timestamp: new Date().toISOString(),
+      details: {
+        prevPurchaseValue: appState.inventory.purchaseValue,
+        prevMarketValue: appState.inventory.marketValue,
+        newValue: pVal,
+      }
+    };
+    
+    setAppState(prev => ({
+      ...prev,
+      inventory: { purchaseValue: pVal, marketValue: mVal },
+      transactions: [...prev.transactions, tx]
+    }));
+    
+    setManualPurchase('');
+    setManualMarket('');
+    alert('تم تعيين أرصدة المخزن الافتتاحية/اليدوية بنجاح! 📦');
   };
 
   // ٣. تسجيل البضاعة التالفة والهدر من الخضار
@@ -350,6 +391,18 @@ export default function Inventory({ appState, onAddTransaction, onAddSupplier }:
         >
           <span>تسجيل التالف 🗑️</span>
           {activeTab === 'waste' && (
+            <motion.div layoutId="inv-active-bar" className="absolute bottom-0 right-0 left-0 h-0.5 bg-emerald-400 rounded-full" />
+          )}
+        </button>
+
+        <button
+          onClick={() => setActiveTab('manual_adjust')}
+          className={`pb-3 pt-1 text-sm font-bold relative transition-all ${
+            activeTab === 'manual_adjust' ? 'text-emerald-400' : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <span>جرد افتتاحي ⚙️</span>
+          {activeTab === 'manual_adjust' && (
             <motion.div layoutId="inv-active-bar" className="absolute bottom-0 right-0 left-0 h-0.5 bg-emerald-400 rounded-full" />
           )}
         </button>
@@ -520,12 +573,67 @@ export default function Inventory({ appState, onAddTransaction, onAddSupplier }:
                       <p className="text-[10px] font-mono text-emerald-400 mt-1">تصبح: {formatCurrency(appState.inventory.marketValue * 1.1)}</p>
                     </button>
                   </div>
+
+                  {/* Custom percentage input */}
+                  <div className="mt-4 pt-4 border-t border-slate-700/50 flex flex-col gap-2">
+                    <label className="text-xs text-slate-400 block">أو أدخل نسبة مخصصة يدوياً (مثال: 12 للرفع، -8 للخفض):</label>
+                    <div className="flex gap-2">
+                      <input 
+                        type="number"
+                        value={customFluctuation}
+                        onChange={(e) => setCustomFluctuation(e.target.value)}
+                        placeholder="النسبة %"
+                        className="flex-1 px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-sm font-mono text-white focus:outline-none"
+                      />
+                      <button 
+                        onClick={() => {
+                          const val = parseFloat(customFluctuation);
+                          if (!isNaN(val)) handlePriceAdjustment(val);
+                          setCustomFluctuation('');
+                        }}
+                        className="px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs"
+                      >
+                        تطبيق
+                      </button>
+                    </div>
+                  </div>
+
                 </div>
               </div>
             </motion.div>
           )}
 
           {/* تبويب: تسجيل بضاعة تالفة */}
+          {activeTab === 'manual_adjust' && (
+            <motion.form 
+              key="manual-form"
+              initial={{ opacity: 0, y: 5 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -5 }}
+              onSubmit={handleManualAdjust} 
+              className="space-y-4"
+            >
+              <div className="bg-slate-800/40 p-4 rounded-2xl border border-slate-800 space-y-4">
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  استخدم هذا القسم لتسجيل بضاعة افتتاحية عند بدء العمل على التطبيق، أو لتصحيح قيم المخزن يدوياً دون أن تؤثر العملية على أرصدة النقدية في حساباتك.
+                </p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">التكلفة الشرائية الحقيقية</label>
+                    <input type="number" required value={manualPurchase} onChange={(e) => setManualPurchase(e.target.value)} className="w-full px-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm font-mono text-white" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">القيمة السوقية اليوم للبيع</label>
+                    <input type="number" required value={manualMarket} onChange={(e) => setManualMarket(e.target.value)} className="w-full px-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-sm font-mono text-white" />
+                  </div>
+                </div>
+                <button type="submit" className="w-full py-3 bg-indigo-500 hover:bg-indigo-400 font-bold text-white text-sm rounded-xl transition-all shadow-md active:scale-98">
+                  ضبط وتحديث أصول المخزن
+                </button>
+              </div>
+            </motion.form>
+          )}
+
           {activeTab === 'waste' && (
             <motion.form 
               key="waste-form"
